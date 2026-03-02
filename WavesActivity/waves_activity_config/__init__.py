@@ -7,12 +7,12 @@ from ..utils.database.models import WavesBind, WavesLivenessRecord
 from ..utils.api.requests import waves_api
 from .waves_activity_config import WavesActivityConfig
 
-sv_rover_reminder = SV("WavesActivity配置")
+sv_WavesActivity = SV("WavesActivity配置")
 
 PREFIX = get_plugin_available_prefix("WavesActivity")
 
 
-@sv_rover_reminder.on_prefix(("开启", "关闭"))
+@sv_WavesActivity.on_prefix(("开启", "关闭"))
 async def switch_liveness_push(bot: Bot, ev: Event):
     if ev.text not in ("活跃度推送",):
         return
@@ -78,7 +78,7 @@ async def switch_liveness_push(bot: Bot, ev: Event):
     await bot.send(" " + msg, at_sender)
 
 
-@sv_rover_reminder.on_prefix(("活跃度阈值", "推送阈值"))
+@sv_WavesActivity.on_prefix(("活跃度阈值", "推送阈值"))
 async def set_liveness_threshold(bot: Bot, ev: Event):
     at_sender = bool(ev.group_id)
     raw_value = ev.text.strip()
