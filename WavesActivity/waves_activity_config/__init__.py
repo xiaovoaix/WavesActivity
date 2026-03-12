@@ -95,7 +95,7 @@ async def switch_liveness_push(bot: Bot, ev: Event):
     await bot.send(" " + msg, at_sender)
 
 
-@sv_WavesActivity.on_prefix(("活跃度阈值", "推送阈值"))
+@sv_WavesActivity.on_prefix("活跃度阈值")
 async def set_liveness_threshold(bot: Bot, ev: Event):
     at_sender = bool(ev.group_id)
     raw_value = ev.text.strip()

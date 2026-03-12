@@ -3,7 +3,7 @@
 from gsuid_core.sv import Plugins
 from gsuid_core.logger import logger
 
-Plugins(name="WavesActivity", force_prefix=["ww"], allow_empty_prefix=False)
+Plugins(name="WavesActivity", force_prefix=["ww"], allow_empty_prefix=False, alias=["wa"])
 
 logger.info("[WavesActivity] 初始化插件...")
 
