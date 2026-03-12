@@ -12,6 +12,23 @@ sv_WavesActivity = SV("WavesActivity配置")
 PREFIX = get_plugin_available_prefix("WavesActivity")
 
 
+def _get_push_times_display() -> str:
+    """读取配置中的推送时间列表，返回展示字符串（不依赖 push 模块，避免循环导入）"""
+    push_time_str = WavesActivityConfig.get_config("LivenessPushTime").data
+    slots = []
+    for slot in push_time_str.split(","):
+        slot = slot.strip()
+        if not slot:
+            continue
+        try:
+            h, m = [int(x) for x in slot.split(":")]
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                slots.append(f"{h:02d}:{m:02d}")
+        except Exception:
+            pass
+    return "、".join(slots) if slots else push_time_str
+
+
 @sv_WavesActivity.on_prefix(("开启", "关闭"))
 async def switch_liveness_push(bot: Bot, ev: Event):
     if ev.text not in ("活跃度推送",):
@@ -62,7 +79,7 @@ async def switch_liveness_push(bot: Bot, ev: Event):
         )
         msg = (
             f"uid {uid} 已开启活跃度推送！\n"
-            f"将在每日 {WavesActivityConfig.get_config('LivenessPushTime').data} "
+            f"将在每日 {_get_push_times_display()} "
             f"检查活跃度，不足时会在本群@您"
         )
     else:

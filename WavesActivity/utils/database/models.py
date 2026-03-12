@@ -1,18 +1,14 @@
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
 from sqlmodel import Field, col, select
-from sqlalchemy import delete, null, update
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import and_
 
-from gsuid_core.logger import logger
 from gsuid_core.utils.database.base_models import Bind, User, BaseModel, with_session
-
-# 插件未发布阶段不执行迁移
 
 T_WavesBind = TypeVar("T_WavesBind", bound="WavesBind")
 T_WavesUser = TypeVar("T_WavesUser", bound="WavesUser")
-T_WavesStaminaRecord = TypeVar("T_WavesStaminaRecord", bound="WavesStaminaRecord")
 T_WavesLivenessRecord = TypeVar("T_WavesLivenessRecord", bound="WavesLivenessRecord")
 
 
@@ -98,7 +94,7 @@ class WavesUser(User, table=True):
     @classmethod
     @with_session
     async def update_last_used_time(
-        cls,
+        cls: Type[T_WavesUser],
         session: AsyncSession,
         uid: str,
         user_id: str,
@@ -125,263 +121,6 @@ class WavesUser(User, table=True):
                 user.created_time = current_time
             return True
         return False
-
-
-class WavesStaminaRecord(BaseModel, table=True):
-    """体力查询记录表"""
-
-    __tablename__ = "WavesStaminaRecord"
-    __table_args__: Dict[str, Any] = {"extend_existing": True}
-
-    uid: str = Field(default="", title="鸣潮UID")
-    bot_self_id: str = Field(default="", title="BotSelfID")
-    mr_query_time: Optional[int] = Field(default=None, title="体力查询时间")
-    mr_value: Optional[int] = Field(default=None, title="结晶波片值")
-    user_email: str = Field(default="", title="用户邮箱")
-    email_last_try_time: Optional[int] = Field(default=None, title="邮件上次尝试发送时间")
-    email_send_success: Optional[bool] = Field(default=None, title="邮箱发送成功")
-    email_last_success_time: Optional[int] = Field(default=None, title="邮件上次发送成功时间")
-    email_fail_count: int = Field(default=0, title="连续发送失败次数")
-    stamina_push_switch: str = Field(default="off", title="体力推送开关")
-    stamina_threshold: Optional[int] = Field(default=None, title="体力阈值")
-    is_ck_valid: Optional[bool] = Field(default=None, title="CK是否有效")
-
-    @classmethod
-    @with_session
-    async def upsert_stamina_query(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        bot_self_id: str,
-        uid: str,
-        mr_query_time: int,
-        mr_value: Optional[int],
-        is_ck_valid: Optional[bool],
-    ) -> bool:
-        sql = select(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        record = result.scalars().first()
-
-        if record:
-            record.bot_self_id = bot_self_id
-            record.mr_query_time = mr_query_time
-            record.mr_value = mr_value
-            record.is_ck_valid = is_ck_valid
-            session.add(record)
-            return True
-
-        session.add(
-            cls(
-                user_id=user_id,
-                bot_id=bot_id,
-                bot_self_id=bot_self_id,
-                uid=uid,
-                mr_query_time=mr_query_time,
-                mr_value=mr_value,
-                is_ck_valid=is_ck_valid,
-            )
-        )
-        return True
-
-    @classmethod
-    @with_session
-    async def update_ck_valid(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        bot_self_id: str,
-        uid: str,
-        is_ck_valid: bool,
-    ) -> bool:
-        sql = select(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        record = result.scalars().first()
-
-        if record:
-            record.bot_self_id = bot_self_id
-            record.is_ck_valid = is_ck_valid
-            session.add(record)
-            return True
-
-        session.add(
-            cls(
-                user_id=user_id,
-                bot_id=bot_id,
-                bot_self_id=bot_self_id,
-                uid=uid,
-                is_ck_valid=is_ck_valid,
-            )
-        )
-        return True
-
-    @classmethod
-    @with_session
-    async def update_email_status(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        bot_self_id: str,
-        uid: str,
-        email_last_try_time: int,
-        email_send_success: bool,
-        email_fail_count: int,
-        email_last_success_time: Optional[int] = None,
-    ) -> bool:
-        sql = select(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        record = result.scalars().first()
-
-        if record:
-            record.bot_self_id = bot_self_id
-            record.email_last_try_time = email_last_try_time
-            record.email_send_success = email_send_success
-            record.email_fail_count = email_fail_count
-            if email_last_success_time is not None:
-                record.email_last_success_time = email_last_success_time
-            session.add(record)
-            return True
-
-        session.add(
-            cls(
-                user_id=user_id,
-                bot_id=bot_id,
-                bot_self_id=bot_self_id,
-                uid=uid,
-                email_last_try_time=email_last_try_time,
-                email_send_success=email_send_success,
-                email_fail_count=email_fail_count,
-                email_last_success_time=email_last_success_time,
-            )
-        )
-        return True
-
-    @classmethod
-    @with_session
-    async def upsert_user_settings(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        bot_self_id: str,
-        uid: str,
-        **data,
-    ) -> bool:
-        sql = select(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        record = result.scalars().first()
-
-        if record:
-            record.bot_self_id = bot_self_id
-            for k, v in data.items():
-                if hasattr(record, k):
-                    setattr(record, k, v)
-            session.add(record)
-            return True
-
-        session.add(
-            cls(
-                user_id=user_id,
-                bot_id=bot_id,
-                bot_self_id=bot_self_id,
-                uid=uid,
-                **data,
-            )
-        )
-        return True
-
-    @classmethod
-    @with_session
-    async def get_record(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        bot_self_id: str,
-        uid: str,
-    ) -> Optional[T_WavesStaminaRecord]:
-        sql = select(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        record = result.scalars().first()
-        return record
-
-    @classmethod
-    @with_session
-    async def get_all_records(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-    ) -> List[T_WavesStaminaRecord]:
-        result = await session.execute(select(cls))
-        data = result.scalars().all()
-        return list(data) if data else []
-
-    @classmethod
-    @with_session
-    async def delete_by_uid(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-        uid: str,
-    ) -> int:
-        sql = delete(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-                cls.uid == uid,
-            )
-        )
-        result = await session.execute(sql)
-        return result.rowcount
-
-    @classmethod
-    @with_session
-    async def delete_by_user(
-        cls: Type[T_WavesStaminaRecord],
-        session: AsyncSession,
-        user_id: str,
-        bot_id: str,
-    ) -> int:
-        sql = delete(cls).where(
-            and_(
-                cls.user_id == user_id,
-                cls.bot_id == bot_id,
-            )
-        )
-        result = await session.execute(sql)
-        return result.rowcount
 
 
 class WavesLivenessRecord(BaseModel, table=True):

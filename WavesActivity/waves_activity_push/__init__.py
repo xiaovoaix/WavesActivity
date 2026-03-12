@@ -1,11 +1,14 @@
 import asyncio
 from datetime import datetime
-from typing import List
+from typing import List, Set
 
 from gsuid_core.aps import scheduler
+from gsuid_core.bot import Bot
 from gsuid_core.gss import gss
 from gsuid_core.logger import logger
+from gsuid_core.models import Event
 from gsuid_core.segment import MessageSegment
+from gsuid_core.sv import SV
 
 from ..utils.api.model import DailyData
 from ..utils.api.request_util import KuroApiResp
@@ -16,6 +19,37 @@ from ..waves_activity_config.waves_activity_config import WavesActivityConfig
 
 _check_lock = asyncio.Lock()
 
+sv_WavesActivityPush = SV("WavesActivity推送")
+
+
+# ── 工具函数 ──────────────────────────────────────────────────────────────────
+
+def _parse_push_times(push_time_str: str) -> List[tuple]:
+    """解析推送时间字符串，返回 (hour, minute) 列表"""
+    results = []
+    for slot in push_time_str.split(","):
+        slot = slot.strip()
+        if not slot:
+            continue
+        try:
+            h, m = [int(x) for x in slot.split(":")]
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                results.append((h, m))
+            else:
+                logger.warning(f"[WavesActivity] 推送时间超出范围: {slot!r}，跳过")
+        except Exception:
+            logger.warning(f"[WavesActivity] 推送时间格式错误: {slot!r}，跳过")
+    return results
+
+
+def _get_push_time_set() -> Set[str]:
+    """返回当前配置的推送时间集合，格式为 {'HH:MM', ...}"""
+    push_time_str = WavesActivityConfig.get_config("LivenessPushTime").data
+    slots = _parse_push_times(push_time_str)
+    return {f"{h:02d}:{m:02d}" for h, m in slots}
+
+
+# ── 活跃度查询与通知 ──────────────────────────────────────────────────────────
 
 async def _query_liveness(uid: str, user_id: str, bot_id: str):
     """查询玩家的每日活跃度，返回 (liveness_cur, liveness_total) 或 None"""
@@ -34,12 +68,12 @@ async def _query_liveness(uid: str, user_id: str, bot_id: str):
 
     daily_info_res = await waves_api.get_daily_info(uid, ck)
     if not isinstance(daily_info_res, KuroApiResp) or not daily_info_res.success:
-        logger.debug(f"[WavesActivity] uid={uid} 每日信息查询失败")
+        logger.info(f"[WavesActivity] uid={uid} 每日信息查询失败")
         return None
 
     daily_info = DailyData.model_validate(daily_info_res.data)
     if not daily_info.livenessData:
-        logger.debug(f"[WavesActivity] uid={uid} 活跃度数据为空")
+        logger.info(f"[WavesActivity] uid={uid} 活跃度数据为空")
         return None
 
     try:
@@ -55,7 +89,7 @@ async def _query_liveness(uid: str, user_id: str, bot_id: str):
     return daily_info.livenessData.cur, daily_info.livenessData.total
 
 
-async def _handle_record(record: WavesLivenessRecord, threshold_default: int, today_str: str) -> None:
+async def _handle_record(record: WavesLivenessRecord, threshold_default: int) -> None:
     if not record.uid:
         return
 
@@ -64,12 +98,7 @@ async def _handle_record(record: WavesLivenessRecord, threshold_default: int, to
         return
 
     if not record.group_id:
-        logger.debug(f"[WavesActivity] 跳过 uid={record.uid}：未设置通知群组")
-        return
-
-    # 今日已通知，跳过
-    if record.liveness_last_notify_date == today_str:
-        logger.debug(f"[WavesActivity] 跳过 uid={record.uid}：今日已发送通知")
+        logger.info(f"[WavesActivity] 跳过 uid={record.uid}：未设置通知群组")
         return
 
     threshold = record.liveness_threshold if record.liveness_threshold is not None else threshold_default
@@ -77,17 +106,17 @@ async def _handle_record(record: WavesLivenessRecord, threshold_default: int, to
 
     result = await _query_liveness(record.uid, record.user_id, record.bot_id)
     if result is None:
-        logger.debug(f"[WavesActivity] uid={record.uid} 活跃度查询失败，跳过")
+        logger.info(f"[WavesActivity] uid={record.uid} 活跃度查询失败，跳过")
         record_fail()
         return
 
     liveness_cur, liveness_total = result
-    logger.debug(
+    logger.info(
         f"[WavesActivity] uid={record.uid} 活跃度={liveness_cur}/{liveness_total} 阈值={threshold}"
     )
 
     if liveness_cur >= threshold:
-        logger.debug(f"[WavesActivity] uid={record.uid} 活跃度已达标，不通知")
+        logger.info(f"[WavesActivity] uid={record.uid} 活跃度已达标，不通知")
         return
 
     # 活跃度不足，发送群内@通知
@@ -112,7 +141,7 @@ async def _handle_record(record: WavesLivenessRecord, threshold_default: int, to
                 "",
             )
             sent = True
-            logger.debug(
+            logger.info(
                 f"[WavesActivity] uid={record.uid} 群 {record.group_id} 通知发送成功 "
                 f"活跃度={liveness_cur}/{liveness_total}"
             )
@@ -122,27 +151,19 @@ async def _handle_record(record: WavesLivenessRecord, threshold_default: int, to
 
     if sent:
         record_success()
-        try:
-            await WavesLivenessRecord.update_last_notify_date(
-                user_id=record.user_id,
-                bot_id=record.bot_id,
-                uid=record.uid,
-                date_str=today_str,
-            )
-        except Exception:
-            logger.exception("[WavesActivity] 更新最后通知日期失败")
     else:
         record_fail()
 
 
-async def waves_activity_liveness_check_task():
+async def _run_liveness_check():
+    """执行完整的活跃度检查流程（有锁保护，防止并发）"""
     if _check_lock.locked():
-        logger.debug("[WavesActivity] 定时检查跳过：已有任务运行中")
+        logger.info("[WavesActivity] 活跃度检查跳过：已有任务运行中")
         return
 
     async with _check_lock:
         if not WavesActivityConfig.get_config("EnableLivenessPush").data:
-            logger.debug("[WavesActivity] 定时检查跳过：活跃度推送未开启")
+            logger.info("[WavesActivity] 活跃度检查跳过：EnableLivenessPush 未开启，请在配置中启用")
             return
 
         try:
@@ -152,43 +173,69 @@ async def waves_activity_liveness_check_task():
             return
 
         if not records:
-            logger.debug("[WavesActivity] 定时检查结束：无开启推送的记录")
+            logger.info("[WavesActivity] 活跃度检查结束：无开启推送的记录")
             return
 
         threshold_default = WavesActivityConfig.get_config("LivenessThreshold").data
-        today_str = datetime.now().strftime("%Y-%m-%d")
         logger.info(
-            f"[WavesActivity] 开始每日活跃度检查，记录数={len(records)} 默认阈值={threshold_default} 日期={today_str}"
+            f"[WavesActivity] 开始活跃度检查，记录数={len(records)} 默认阈值={threshold_default}"
         )
 
         for record in records:
             try:
-                await _handle_record(record, threshold_default, today_str)
+                await _handle_record(record, threshold_default)
             except Exception:
                 logger.exception(f"[WavesActivity] 处理记录失败 uid={record.uid}")
             await asyncio.sleep(0.5)
 
-        logger.info("[WavesActivity] 每日活跃度检查完成")
+        logger.info("[WavesActivity] 活跃度检查完成")
 
 
-def _register_liveness_job():
-    """根据配置注册每日活跃度推送定时任务"""
+# ── 定时任务：每分钟检查一次是否到达推送时间 ──────────────────────────────────
+
+@scheduler.scheduled_job("cron", minute="*", id="waves_activity_minute_tick")
+async def waves_activity_minute_tick():
+    """每分钟触发，检查当前时间是否为配置的推送时间之一"""
+    now = datetime.now()
+    current_hhmm = f"{now.hour:02d}:{now.minute:02d}"
+
+    push_times = _get_push_time_set()
+    if not push_times:
+        return
+
+    if current_hhmm not in push_times:
+        return  # 不是推送时间，静默返回
+
+    logger.info(f"[WavesActivity] 到达推送时间 {current_hhmm}，触发活跃度检查")
+    await _run_liveness_check()
+
+
+# ── 指令 ─────────────────────────────────────────────────────────────────────
+
+@sv_WavesActivityPush.on_fullmatch("手动检查活跃度")
+async def manual_liveness_check(bot: Bot, ev: Event):
+    """手动触发活跃度检查（调试用）"""
+    logger.info(f"[WavesActivity] [{ev.user_id}] 手动触发活跃度检查")
+    await bot.send("正在手动触发活跃度检查，请查看日志...")
+    await _run_liveness_check()
+    await bot.send("活跃度检查完成")
+
+
+@sv_WavesActivityPush.on_fullmatch("查看推送时间")
+async def show_push_times(bot: Bot, ev: Event):
+    """查看当前配置的推送时间（调试用）"""
     push_time_str = WavesActivityConfig.get_config("LivenessPushTime").data
-    try:
-        hour, minute = [int(x) for x in push_time_str.strip().split(":")]
-    except Exception:
-        logger.warning(f"[WavesActivity] 推送时间格式错误: {push_time_str!r}，使用默认 22:00")
-        hour, minute = 22, 0
+    slots = _parse_push_times(push_time_str)
+    enabled = WavesActivityConfig.get_config("EnableLivenessPush").data
 
-    scheduler.add_job(
-        waves_activity_liveness_check_task,
-        "cron",
-        hour=hour,
-        minute=minute,
-        id="waves_activity_liveness_check",
-        replace_existing=True,
-    )
-    logger.info(f"[WavesActivity] 活跃度推送定时任务已注册，每日 {hour:02d}:{minute:02d} 执行")
-
-
-_register_liveness_job()
+    if not slots:
+        msg = f"⚠️ 当前推送时间配置无效：{push_time_str!r}\n请检查格式，例如：12:00,18:00,22:00"
+    else:
+        times_str = "、".join(f"{h:02d}:{m:02d}" for h, m in slots)
+        now_str = datetime.now().strftime("%H:%M")
+        msg = (
+            f"📅 当前推送时间配置：{times_str}\n"
+            f"🔧 推送总开关：{'已开启' if enabled else '❌ 未开启'}\n"
+            f"🕐 当前时间：{now_str}"
+        )
+    await bot.send(msg)
